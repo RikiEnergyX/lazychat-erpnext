@@ -785,6 +785,10 @@
 		});
 
 		bridge.on("agentRequest", (payload) => {
+			/* Keepalive: the iframe aborts with "No response from host" after 8s.
+			   The backend emits its first chunk only after the full LLM completion,
+			   so acknowledge immediately with an empty delta. */
+			bridge.send("agentChunk", { sid: payload.sid, requestId: payload.requestId, delta: "" });
 			const ctrl = new AbortController();
 			aborts.set(payload.requestId, ctrl);
 			runAgentTurn(
