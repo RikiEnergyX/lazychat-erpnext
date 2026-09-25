@@ -524,11 +524,17 @@
 		const doctype = input && typeof input === "object" && typeof input.doctype === "string" ? input.doctype : "";
 		return doctype ? base + " " + doctype : base;
 	}
+	function phaseForTool(name) {
+		if (/^prepare/.test(name)) return "Menyiapkan perubahan…";
+		if (/^(run_sql|run_python|run_report|report|aggregate)/.test(name)) return "Menganalisis data…";
+		return "Memeriksa data…";
+	}
 	function makeToolProgressTracker(emit) {
 		const starts = new Map();
 		let seq = 0;
 		return {
 			toolUse(name, input) {
+				emit.phase && emit.phase(phaseForTool(name));
 				const q = starts.get(name) || [];
 				q.push({ input: input, t0: Date.now() });
 				starts.set(name, q);
@@ -849,29 +855,34 @@
 		});
 
 		bridge.on("agentRequest", (payload) => {
-			/* Working indicator + keepalive: agentStatus pings clear the iframe's
-			   8s watchdog and stream plain-language phase text into the thought
-			   trail. Unlike a chunk, a status ping does NOT retire the animated
-			   liveStatus line — only the first real content chunk does. */
-			const phases = [
-				"Menganalisis permintaan Anda…",
-				"Memeriksa data yang diperlukan…",
-				"Menyusun langkah pengerjaan…",
-				"Menyusun jawaban…",
-			];
-			let phaseIdx = 0;
-			let lastStatus = null;
-			const sendStatus = (text) => {
-				if (text === lastStatus) text = "";
-				lastStatus = text;
+			/* Working indicator: agentStatus messages stream plain-language phase
+			   text into the thought trail. Each distinct phase is sent AT MOST
+			   ONCE (the dist appends every received text to the trail, so any
+			   repeat would echo). Phases advance on real SSE events via
+			   emit.phase; the interval only fires the final phase after a 20s
+			   lull (the model is composing). The first status disarms the
+			   iframe's 8s watchdog permanently. Unlike a chunk, a status does
+			   NOT retire the animated liveStatus line. */
+			const phases = {
+				start: "Menganalisis permintaan…",
+				read: "Memeriksa data…",
+				analyze: "Menganalisis data…",
+				prepare: "Menyiapkan perubahan…",
+				answer: "Menyusun jawaban…",
+			};
+			const sentPhases = new Set();
+			let lastPhaseAt = 0;
+			const setPhase = (text) => {
+				if (!text || sentPhases.has(text)) return;
+				sentPhases.add(text);
+				lastPhaseAt = Date.now();
 				bridge.send("agentStatus", { sid: payload.sid, requestId: payload.requestId, text: text });
 			};
 			const statusTimer = setInterval(() => {
-				sendStatus(phases[Math.min(phaseIdx, phases.length - 1)]);
-				phaseIdx++;
-			}, 3000);
+				if (Date.now() - lastPhaseAt > 20000) setPhase(phases.answer);
+			}, 10000);
 			const stopStatus = () => clearInterval(statusTimer);
-			sendStatus(phases[phaseIdx++]);
+			setPhase(phases.start);
 			const ctrl = new AbortController();
 			aborts.set(payload.requestId, ctrl);
 			runAgentTurn(
@@ -909,6 +920,7 @@
 					},
 					inject: (msg) =>
 						bridge.send("injectMessage", { sessionId: payload.sid, message: msg }),
+					phase: setPhase,
 				},
 				getConvoId,
 				setConvoId,
