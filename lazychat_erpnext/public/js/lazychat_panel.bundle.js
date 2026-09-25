@@ -500,16 +500,54 @@
 			});
 	}
 
+	/* Progress feed — each completed tool call becomes an mcpTool timeline card
+	   inside the iframe (tool name, duration, expandable result preview) instead
+	   of a plain-text "Calling x" line. Starts are paired with results per tool
+	   name; tools run sequentially within a turn. */
+	function makeToolProgressTracker(emit) {
+		const starts = new Map();
+		let seq = 0;
+		return {
+			toolUse(name, input) {
+				const q = starts.get(name) || [];
+				q.push({ input: input, t0: Date.now() });
+				starts.set(name, q);
+			},
+			toolResult(name, result) {
+				const q = starts.get(name) || [];
+				const st = q.shift() || { input: null, t0: Date.now() };
+				const isObj = result && typeof result === "object";
+				const ok = !(isObj && result.ok === false);
+				let preview = "";
+				try { preview = isObj ? JSON.stringify(result) : String(result); } catch (_e) { preview = ""; }
+				emit.inject({
+					id: "tc_" + Date.now() + "_" + (seq++),
+					ts: Date.now(),
+					kind: "mcpTool",
+					name: name,
+					argsPreview: st.input ? JSON.stringify(st.input).slice(0, 120) : "",
+					status: ok ? "success" : "error",
+					startedAt: st.t0,
+					completedAt: Date.now(),
+					resultBytes: preview.length,
+					resultPreview: ok ? preview.slice(0, 1500) : "",
+					errorMessage: ok ? "" : (isObj && typeof result.error === "string" ? result.error.slice(0, 300) : preview.slice(0, 300)),
+				});
+			},
+		};
+	}
+
 	function replayBatchEvents(data, req, emit, setConvoId) {
 		if (data.conversation_id) setConvoId(req.sid, data.conversation_id);
 		const events = data.events || [];
+		const tracker = makeToolProgressTracker(emit);
 		for (const ev of events) {
 			if (ev.type === "text_delta") {
 				emit.chunk(ev.delta || "");
 			} else if (ev.type === "tool_use") {
-				emit.chunk(`\n\n> _Calling \`${ev.name}\`_\n\n`);
+				tracker.toolUse(ev.name, ev.input);
 			} else if (ev.type === "tool_result") {
-				/* swallow — the assistant will narrate the result on its next text_delta */
+				tracker.toolResult(ev.name, ev.result);
 			}
 		}
 		emit.done("stop");
@@ -519,6 +557,7 @@
 		const reader = res.body.getReader();
 		const decoder = new TextDecoder();
 		let buf = "";
+		const tracker = makeToolProgressTracker(emit);
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
@@ -544,7 +583,9 @@
 				if (event === "text_delta") {
 					emit.chunk(payload.delta || "");
 				} else if (event === "tool_use") {
-					emit.chunk(`\n\n> _Calling \`${payload.name}\`_\n\n`);
+					tracker.toolUse(payload.name, payload.input);
+				} else if (event === "tool_result") {
+					tracker.toolResult(payload.name, payload.result);
 				} else if (event === "conversation") {
 					if (payload.conversation_id) setConvoId(req.sid, payload.conversation_id);
 				} else if (event === "error") {
@@ -820,6 +861,8 @@
 							retryable,
 						});
 					},
+					inject: (msg) =>
+						bridge.send("injectMessage", { sessionId: payload.sid, message: msg }),
 				},
 				getConvoId,
 				setConvoId,
