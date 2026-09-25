@@ -62,7 +62,8 @@ begin running tools step-by-step.
 
 ASK_MODE_BLOCK = """
 ASK BEFORE EDITS MODE. The user wants to confirm every mutation explicitly.
-PREFER prepare_* staging tools for all mutations (the user clicks Apply per call).
+PREFER prepare_* staging tools for all mutations (the user applies each with
+the /commit <preview_token> slash command — the desk panel has no Apply button).
 For analytics, prefer run_sql_select / run_python_readonly / get_list — those
 auto-execute and don't need confirmation.
 """.strip()
@@ -411,7 +412,7 @@ You don't drive this loop — it's system-orchestrated. Your job is to produce
 the BEST FIRST CUT possible (follow the BUILDING DESK PAGES playbook above),
 because every fix iteration costs an LLM call and the user's patience.
 
-If the visual judge surfaces mismatches via `prepare_update_doc` Apply cards,
+If the visual judge surfaces mismatches via `prepare_update_doc` staging results,
 treat them as system feedback: apply the patches, don't re-derive them. If
 the user says 'stop iterating' or rejects a patch, halt and ask what they
 want next.
@@ -756,36 +757,33 @@ For ALL prepare_* tools:
 2. After calling a prepare_* tool, your reply ENDS as soon as you've narrated what was
    staged. Cap that narration at 1–2 short sentences + (for run_sql / run_python) the
    EXACT query/code in a fenced code block. STOP THERE. Do NOT add bullet-list
-   explanations of "what the script will do", do NOT write a recap section, do NOT say
-   "Click Apply in the card above" or "Once it runs, I'll share..." — every line you add
-   after the staging pushes the action card up and out of the user's viewport, defeating
-   the inline-button UX.
-3. The chat-ui auto-renders an inline Apply / Cancel action card directly below your
-   reply — the user clicks Apply to commit. **COMMIT-INSTRUCTION FORBIDDEN**: NEVER
-   write the literal string "/commit" followed by a token in your reply. NEVER write
-   "Reply with /commit TOKEN to ...". NEVER echo the preview_token in your reply at
-   all. The chat-ui auto-renders the Apply button — your job ENDS at narrating what
-   was staged. Adding a /commit instruction creates two ambiguous CTAs (button vs
-   slash-command) and confuses the user. The chat-ui post-processes your reply and
-   strips any leaked /commit lines, but you should not rely on that — write
-   correctly the first time.
+   explanations of "what the script will do", do NOT write a recap section, and do NOT
+   say "Click Apply on the card above" — the desk panel has NO Apply cards or buttons.
+3. COMMIT VIA SLASH COMMAND (CRITICAL): the desk panel has no inline Apply button — the
+   ONLY way the user can apply a staged action is the slash command. End EVERY staging
+   reply with exactly ONE LINE per staged action, verbatim, alone on its own line so the
+   user can copy it:
+     /commit <preview_token>
+   Tokens are single-use, bound to the user, and expire after 30 minutes — if one
+   expired, re-stage with a fresh prepare_* call and give the new token. Do not
+   paraphrase the command, do not wrap it in a code fence, do not replace it with
+   words like "the token above".
 4. NEVER call any commit tool yourself — the /commit slash command is handled outside the
-   agent loop and only fires when the user clicks Apply (or types /commit TOKEN as a power-user
-   fallback).
-5. If the user does NOT confirm (clicks Cancel, or sends a new message instead), do not retry.
+   agent loop and only fires when the user sends it as a message.
+5. If the user does NOT confirm (sends a new message instead), do not retry.
    Acknowledge and move on.
 6. TOOL-ERROR HONESTY (CRITICAL): if a prepare_* call returned an error (the tool result has
-   `error: ...` or `ok: false`, or the chat shows a red Failed card), you MUST acknowledge
+   `error: ...` or `ok: false`), you MUST acknowledge
    the failure to the user in your next sentence. Do NOT narrate as if the staging succeeded.
-   Do NOT say "I've staged a comprehensive..." or "Click Apply" when the last call failed.
+   Do NOT say "I've staged a comprehensive..." when the last call failed.
    Do NOT write recap sections describing "what the report will include" if no preview_token
    was returned. Failure modes to avoid:
-   - "Perfect! I've staged..." after a Failed card → wrong; acknowledge the error and either
+   - "Perfect! I've staged..." after a failed prepare_* → wrong; acknowledge the error and either
      fix it or ask the user.
    - Re-listing the desired columns / features after a failure → wrong; the user can read
-     the failure card themselves, narrate a NEXT-STEP not a wishlist.
-   - Telling the user "Click Apply below to create it" when the last action card is RED /
-     Failed → wrong; that Apply doesn't exist.
+     the failure themselves, narrate a NEXT-STEP not a wishlist.
+   - Giving a /commit line for an action whose prepare_* FAILED → wrong; there is no
+     token to commit.
    On error, your next message has shape:
      "That call failed: <one-line summary of the error>. <one-line next step>."
    If the error includes a "Use the typed wrapper X instead" hint, IMMEDIATELY retry with
@@ -1142,6 +1140,12 @@ def run_agentic_turn(
 				allow_writes=allow_writes,
 				desk_context=desk_context,
 			)
+			if isinstance(result, dict) and result.get("confirm_with"):
+				# prepare_* hints are written for the chat-ui's inline Apply card,
+				# which does not exist on the desk-panel (backend agent) surface.
+				result["confirm_with"] = (
+					"send /commit <preview_token> as a message to apply — the desk panel has no Apply button"
+				)
 			if emit:
 				emit({"type": "tool_result", "name": tu["name"], "result": result})
 			tool_results.append(
