@@ -311,7 +311,7 @@
 	 * Intercepts /commit slash commands; tries SSE first; falls back to batch + event replay.
 	 * ------------------------------------------------------------------ */
 	function runCommitCommand(token, emit) {
-		emit.chunk("Committing token `" + token + "` ...\n\n");
+		emit.chunk("Menerapkan perubahan…\n\n");
 		fetch("/api/method/lazychat_erpnext.desk_assistant.api.commit_prepared_action", {
 			method: "POST",
 			credentials: "include",
@@ -326,9 +326,9 @@
 				const m = (j && j.message) || {};
 				if (m.ok) {
 					const link = m.link ? "[" + m.doctype + "/" + m.name + "](" + m.link + ")" : (m.doctype + "/" + m.name);
-					emit.chunk("**Done** — " + (m.action || "applied") + " " + link + "\n");
+					emit.chunk("**Selesai** — " + link + "\n");
 				} else {
-					emit.chunk("**Failed** — " + (m.error || "Unknown error") + "\n");
+					emit.chunk("**Gagal** — " + (m.error || "Kesalahan tidak diketahui") + "\n");
 				}
 				emit.done("stop");
 			})
@@ -347,7 +347,7 @@
 	 * /commit). User aborts the picker → no-op, prompt them to pick again.
 	 * ------------------------------------------------------------------ */
 	function runUploadCommand(token, emit) {
-		emit.chunk("Opening file picker for token `" + token + "` …\n\n");
+		emit.chunk("Membuka pilih berkas…\n\n");
 		const input = document.createElement("input");
 		input.type = "file";
 		// `accept` from the staged token would require a server roundtrip just
@@ -360,11 +360,11 @@
 			const file = input.files && input.files[0];
 			document.body.removeChild(input);
 			if (!file) {
-				emit.chunk("_No file selected — aborted._");
+				emit.chunk("_Tidak ada berkas dipilih — dibatalkan._");
 				emit.done("stop");
 				return;
 			}
-			emit.chunk("Uploading " + file.name + " (" + Math.round(file.size / 1024) + " KB) …\n\n");
+			emit.chunk("Mengunggah " + file.name + " …\n\n");
 			const fd = new FormData();
 			fd.append("file", file);
 			fd.append("is_private", "1");
@@ -382,7 +382,7 @@
 					if (!fileUrl) {
 						throw new Error("upload_file returned no file_url: " + JSON.stringify(uploaded));
 					}
-					emit.chunk("Uploaded → " + fileUrl + ". Attaching …\n\n");
+					emit.chunk("Melampirkan ke dokumen…\n\n");
 					return fetch("/api/method/lazychat_erpnext.desk_assistant.api.commit_prepared_action", {
 						method: "POST",
 						credentials: "include",
@@ -398,9 +398,9 @@
 					const m = (j && j.message) || {};
 					if (m.ok) {
 						const link = m.link ? "[" + m.doctype + "/" + m.name + "](" + m.link + ")" : (m.doctype + "/" + m.name);
-						emit.chunk("**Attached** — file linked to " + link + "\n");
+						emit.chunk("**Terlampir** — " + link + "\n");
 					} else {
-						emit.chunk("**Failed** — " + (m.error || "Unknown error") + "\n");
+						emit.chunk("**Gagal** — " + (m.error || "Kesalahan tidak diketahui") + "\n");
 					}
 					emit.done("stop");
 				})
@@ -501,9 +501,29 @@
 	}
 
 	/* Progress feed — each completed tool call becomes an mcpTool timeline card
-	   inside the iframe (tool name, duration, expandable result preview) instead
-	   of a plain-text "Calling x" line. Starts are paired with results per tool
-	   name; tools run sequentially within a turn. */
+	   inside the iframe. Lay users get a plain-language label; raw tool names,
+	   argument JSON, and result previews stay hidden. Only a short error text
+	   survives (users paste it when reporting problems). Starts are paired with
+	   results per raw tool name; tools run sequentially within a turn. */
+	const TOOL_LABELS = [
+		[/^prepare_create/, "Menyiapkan data baru"],
+		[/^prepare_update/, "Menyiapkan perubahan"],
+		[/^prepare_delete/, "Menyiapkan penghapusan"],
+		[/^prepare_submit/, "Menyiapkan pengajuan"],
+		[/^commit/, "Menerapkan perubahan"],
+		[/^(get_list|get_value|get_doc|get_count|count_doc|aggregate|dashboard_chart_data|number_card_value)/, "Memeriksa data"],
+		[/^(search_link|search_global|search_doctype|search)/, "Mencari data"],
+		[/^(describe_doctype|get_doctype_links|find_join_path)/, "Memeriksa struktur data"],
+		[/^(search_kb|kb_)/, "Mencari di dokumen"],
+		[/^(run_sql|run_python|run_report|report)/, "Menganalisis data"],
+		[/^(get_stock_balance|get_account_balance|get_outstanding|get_open_invoices|get_item_price)/, "Memeriksa angka"],
+	];
+	function friendlyToolLabel(name, input) {
+		const rule = TOOL_LABELS.find(([re]) => re.test(name));
+		const base = rule ? rule[1] : "Memproses data";
+		const doctype = input && typeof input === "object" && typeof input.doctype === "string" ? input.doctype : "";
+		return doctype ? base + " " + doctype : base;
+	}
 	function makeToolProgressTracker(emit) {
 		const starts = new Map();
 		let seq = 0;
@@ -518,20 +538,23 @@
 				const st = q.shift() || { input: null, t0: Date.now() };
 				const isObj = result && typeof result === "object";
 				const ok = !(isObj && result.ok === false);
-				let preview = "";
-				try { preview = isObj ? JSON.stringify(result) : String(result); } catch (_e) { preview = ""; }
+				let errText = "";
+				if (!ok) {
+					if (isObj && typeof result.error === "string") errText = result.error;
+					else { try { errText = isObj ? JSON.stringify(result) : String(result); } catch (_e) { errText = ""; } }
+				}
 				emit.inject({
 					id: "tc_" + Date.now() + "_" + (seq++),
 					ts: Date.now(),
 					kind: "mcpTool",
-					name: name,
-					argsPreview: st.input ? JSON.stringify(st.input).slice(0, 120) : "",
+					name: friendlyToolLabel(name, st.input),
+					argsPreview: "",
 					status: ok ? "success" : "error",
 					startedAt: st.t0,
 					completedAt: Date.now(),
-					resultBytes: preview.length,
-					resultPreview: ok ? preview.slice(0, 1500) : "",
-					errorMessage: ok ? "" : (isObj && typeof result.error === "string" ? result.error.slice(0, 300) : preview.slice(0, 300)),
+					resultBytes: null,
+					resultPreview: "",
+					errorMessage: ok ? "" : errText.slice(0, 200),
 				});
 			},
 		};
@@ -826,10 +849,29 @@
 		});
 
 		bridge.on("agentRequest", (payload) => {
-			/* Keepalive: the iframe aborts with "No response from host" after 8s.
-			   The backend emits its first chunk only after the full LLM completion,
-			   so acknowledge immediately with an empty delta. */
-			bridge.send("agentChunk", { sid: payload.sid, requestId: payload.requestId, delta: "" });
+			/* Working indicator + keepalive: agentStatus pings clear the iframe's
+			   8s watchdog and stream plain-language phase text into the thought
+			   trail. Unlike a chunk, a status ping does NOT retire the animated
+			   liveStatus line — only the first real content chunk does. */
+			const phases = [
+				"Menganalisis permintaan Anda…",
+				"Memeriksa data yang diperlukan…",
+				"Menyusun langkah pengerjaan…",
+				"Menyusun jawaban…",
+			];
+			let phaseIdx = 0;
+			let lastStatus = null;
+			const sendStatus = (text) => {
+				if (text === lastStatus) text = "";
+				lastStatus = text;
+				bridge.send("agentStatus", { sid: payload.sid, requestId: payload.requestId, text: text });
+			};
+			const statusTimer = setInterval(() => {
+				sendStatus(phases[Math.min(phaseIdx, phases.length - 1)]);
+				phaseIdx++;
+			}, 3000);
+			const stopStatus = () => clearInterval(statusTimer);
+			sendStatus(phases[phaseIdx++]);
 			const ctrl = new AbortController();
 			aborts.set(payload.requestId, ctrl);
 			runAgentTurn(
@@ -842,10 +884,13 @@
 					signal: ctrl.signal,
 				},
 				{
-					chunk: (delta) =>
-						bridge.send("agentChunk", { sid: payload.sid, requestId: payload.requestId, delta }),
+					chunk: (delta) => {
+						stopStatus();
+						bridge.send("agentChunk", { sid: payload.sid, requestId: payload.requestId, delta });
+					},
 					done: (finishReason) => {
 						aborts.delete(payload.requestId);
+						stopStatus();
 						bridge.send("agentDone", {
 							sid: payload.sid,
 							requestId: payload.requestId,
@@ -854,6 +899,7 @@
 					},
 					error: (message, retryable) => {
 						aborts.delete(payload.requestId);
+						stopStatus();
 						bridge.send("agentError", {
 							sid: payload.sid,
 							requestId: payload.requestId,
